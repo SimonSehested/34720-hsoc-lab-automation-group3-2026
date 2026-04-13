@@ -1,0 +1,7 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"print\\(open\\(r'c:\\\\Users\\\\FTNK-LocalAdm\\\\Desktop\\\\34720-hsoc-lab-automation-group3-2026\\\\laser_polarization_optimizer.py'\\).read\\(\\)\\)\")"
+    ]
+  }
+}
