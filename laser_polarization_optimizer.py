@@ -30,7 +30,7 @@ except:
     None
 
 # Connect to power meter via USB
-power_meter = visa.ResourceManager().open_resource('USB0::0x1313::0x8078::P0028333::INSTR')
+power_meter = visa.ResourceManager().open_resource('USB0::0x1313::0x8078::P0024464::INSTR')
 
 
 def get_power():
