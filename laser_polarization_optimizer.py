@@ -668,4 +668,144 @@ def benchmark_optimizers(n_runs=1, start_positions=None):
 
     return results
 
-benchmark_optimizers()
+def measure_power_avg(duration_seconds=2.0):
+    """Measure optical power over a duration and return the average in dBm."""
+    start_time = time.time()
+    readings = []
+    while time.time() - start_time < duration_seconds:
+        readings.append(get_power())
+        time.sleep(0.01)
+    avg_power_w = np.mean(readings)
+    avg_power_dbm = 10 * np.log10(max(avg_power_w * 1e3, 1e-30))
+    return avg_power_dbm
+
+
+def benchmark_fast_sweep(n_trials=5, coarse_values=None, fine_values=None,
+                         settle_time=3.0, measure_duration=2.0,
+                         sweep_start=0, sweep_end=154, sample_interval=0.01,
+                         fine_window=5, fine_settle_time=0.1,
+                         raw_csv_path="benchmark_raw.csv",
+                         summary_csv_path="benchmark_summary.csv"):
+    """Benchmark fast_sweep with all combinations of coarse and fine iterations.
+
+    For each (coarse, fine) combination:
+      - Run n_trials with random start positions
+      - After optimization: wait settle_time, then measure for measure_duration
+      - Save raw trial data to raw_csv_path
+      - Save summary (mean, std) to summary_csv_path
+    """
+    if coarse_values is None:
+        coarse_values = [1, 2, 3, 4, 5]
+    if fine_values is None:
+        fine_values = [1, 2, 3, 4, 5]
+
+    import csv
+
+    raw_fieldnames = [
+        "trial", "coarse", "fine",
+        "start_arm1", "start_arm2", "start_arm3",
+        "final_arm1", "final_arm2", "final_arm3",
+        "elapsed_seconds", "final_power_dbm"
+    ]
+
+    with open(raw_csv_path, "w", newline="") as raw_f:
+        writer = csv.DictWriter(raw_f, fieldnames=raw_fieldnames)
+        writer.writeheader()
+
+        for coarse in coarse_values:
+            for fine in fine_values:
+                print(f"\nBenchmarking coarse={coarse}, fine={fine}")
+
+                for trial_idx in range(n_trials):
+                    start_positions = [
+                        int(np.random.randint(0, 155)),
+                        int(np.random.randint(0, 155)),
+                        int(np.random.randint(0, 155)),
+                    ]
+
+                    set_arms(*start_positions)
+                    start_time = time.perf_counter()
+
+                    final_positions = fast_sweep(
+                        coarse_iterations=coarse,
+                        fine_iterations=fine,
+                        start_positions=start_positions,
+                        sweep_start=sweep_start,
+                        sweep_end=sweep_end,
+                        sample_interval=sample_interval,
+                        fine_window=fine_window,
+                        fine_settle_time=fine_settle_time,
+                        plot=False,
+                    )
+
+                    elapsed_seconds = time.perf_counter() - start_time
+
+                    time.sleep(settle_time)
+                    final_power_dbm = measure_power_avg(duration_seconds=measure_duration)
+
+                    row = {
+                        "trial": trial_idx + 1,
+                        "coarse": coarse,
+                        "fine": fine,
+                        "start_arm1": start_positions[0],
+                        "start_arm2": start_positions[1],
+                        "start_arm3": start_positions[2],
+                        "final_arm1": final_positions[0],
+                        "final_arm2": final_positions[1],
+                        "final_arm3": final_positions[2],
+                        "elapsed_seconds": round(elapsed_seconds, 3),
+                        "final_power_dbm": round(final_power_dbm, 4),
+                    }
+                    writer.writerow(row)
+
+                    print(
+                        f"  Trial {trial_idx + 1}/{n_trials}: "
+                        f"{elapsed_seconds:.2f} s, "
+                        f"{final_power_dbm:.2f} dBm, "
+                        f"positions {final_positions}"
+                    )
+
+    summary_fieldnames = [
+        "coarse", "fine",
+        "elapsed_mean", "elapsed_std",
+        "power_mean", "power_std"
+    ]
+
+    summary_data = {}
+    for coarse in coarse_values:
+        for fine in fine_values:
+            key = (coarse, fine)
+            summary_data[key] = {"elapsed": [], "power": []}
+
+    with open(raw_csv_path, "r", newline="") as raw_f:
+        reader = csv.DictReader(raw_f)
+        for row in reader:
+            key = (int(row["coarse"]), int(row["fine"]))
+            summary_data[key]["elapsed"].append(float(row["elapsed_seconds"]))
+            summary_data[key]["power"].append(float(row["final_power_dbm"]))
+
+    with open(summary_csv_path, "w", newline="") as summary_f:
+        writer = csv.DictWriter(summary_f, fieldnames=summary_fieldnames)
+        writer.writeheader()
+
+        for coarse in coarse_values:
+            for fine in fine_values:
+                key = (coarse, fine)
+                elapsed_list = summary_data[key]["elapsed"]
+                power_list = summary_data[key]["power"]
+
+                row = {
+                    "coarse": coarse,
+                    "fine": fine,
+                    "elapsed_mean": round(np.mean(elapsed_list), 3),
+                    "elapsed_std": round(np.std(elapsed_list), 3),
+                    "power_mean": round(np.mean(power_list), 4),
+                    "power_std": round(np.std(power_list), 4),
+                }
+                writer.writerow(row)
+
+    print(f"\nRaw data saved to {raw_csv_path}")
+    print(f"Summary saved to {summary_csv_path}")
+
+
+benchmark_fast_sweep()
