@@ -16,9 +16,11 @@
 import pyvisa as visa
 import numpy as np
 import sys
+import os
 import time
 import threading
 import matplotlib.pyplot as plt
+from datetime import datetime
 from scipy.optimize import curve_fit
 
 # NOTE: Update this path to match your local installation of thjalfe_instrument_control
@@ -445,7 +447,7 @@ plt.show()
 #measure_power_over_time()
 
 def fast_sweep(coarse_iterations=1, fine_iterations=1, start_positions=None,
-               sweep_start=0, sweep_end=155, sample_interval=0.01,
+               sweep_start=0, sweep_end=154, sample_interval=0.01,
                fine_window=5, fine_settle_time=0.1, plot=True):
     def measure_during_sweep(arm_idx, start_pos, end_pos, positions, sample_interval):
         sweep = []
@@ -524,7 +526,7 @@ def fast_sweep(coarse_iterations=1, fine_iterations=1, start_positions=None,
                 return local_positions, local_powers, best_local_pos
 
     def needs_restart(current_positions):
-        return any(pos < 5 or pos > 150 for pos in current_positions)
+        return any(pos < 5 or pos > 149 for pos in current_positions)
 
     positions = list(start_positions) if start_positions is not None else [0, 77, 77]
     if len(positions) != 3:
@@ -680,109 +682,134 @@ def measure_power_avg(duration_seconds=2.0):
     return avg_power_dbm
 
 
-def benchmark_fast_sweep(n_trials=5, coarse_values=None, fine_values=None,
-                         settle_time=3.0, measure_duration=2.0,
-                         sweep_start=0, sweep_end=154, sample_interval=0.01,
-                         fine_window=5, fine_settle_time=0.1,
-                         raw_csv_path="benchmark_raw.csv",
-                         summary_csv_path="benchmark_summary.csv"):
-    """Benchmark fast_sweep with all combinations of coarse and fine iterations.
+def write_benchmark_row(writer, csv_file, row):
+    """Write one benchmark row and force it to disk before the next run starts."""
+    writer.writerow(row)
+    csv_file.flush()
+    os.fsync(csv_file.fileno())
 
-    For each (coarse, fine) combination:
-      - Run n_trials with random start positions
-      - After optimization: wait settle_time, then measure for measure_duration
-      - Save raw trial data to raw_csv_path
-      - Save summary (mean, std) to summary_csv_path
-    """
-    if coarse_values is None:
-        coarse_values = [1, 2, 3, 4, 5]
-    if fine_values is None:
-        fine_values = [1, 2, 3, 4, 5]
 
+def current_timestamp():
+    """Return a local timestamp suitable for benchmark logs."""
+    return datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def ensure_benchmark_csv_columns(csv_path, fieldnames):
+    """Add missing columns to an existing benchmark CSV without dropping rows."""
     import csv
 
-    raw_fieldnames = [
-        "trial", "coarse", "fine",
-        "start_arm1", "start_arm2", "start_arm3",
-        "final_arm1", "final_arm2", "final_arm3",
-        "elapsed_seconds", "final_power_dbm"
-    ]
+    if not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0:
+        return
 
-    with open(raw_csv_path, "w", newline="") as raw_f:
-        writer = csv.DictWriter(raw_f, fieldnames=raw_fieldnames)
+    with open(csv_path, "r", newline="") as csv_f:
+        reader = csv.DictReader(csv_f)
+        existing_fieldnames = reader.fieldnames or []
+        rows = list(reader)
+
+    if existing_fieldnames == fieldnames:
+        return
+
+    merged_fieldnames = list(existing_fieldnames)
+    for fieldname in fieldnames:
+        if fieldname not in merged_fieldnames:
+            merged_fieldnames.append(fieldname)
+
+    temp_path = f"{csv_path}.tmp"
+    with open(temp_path, "w", newline="") as temp_f:
+        writer = csv.DictWriter(temp_f, fieldnames=merged_fieldnames)
         writer.writeheader()
+        for row in rows:
+            writer.writerow({fieldname: row.get(fieldname, "") for fieldname in merged_fieldnames})
+        temp_f.flush()
+        os.fsync(temp_f.fileno())
 
-        for coarse in coarse_values:
-            for fine in fine_values:
-                print(f"\nBenchmarking coarse={coarse}, fine={fine}")
+    os.replace(temp_path, csv_path)
 
-                for trial_idx in range(n_trials):
-                    start_positions = [
-                        int(np.random.randint(0, 155)),
-                        int(np.random.randint(0, 155)),
-                        int(np.random.randint(0, 155)),
-                    ]
 
-                    set_arms(*start_positions)
-                    start_time = time.perf_counter()
+def make_ordered_benchmark_schedule(coarse_values, fine_values, n_trials):
+    """Return C1F1, C2F1, ... ordering repeated until every setup has n_trials."""
+    existing_counts = {
+        (coarse, fine): 0
+        for coarse in coarse_values
+        for fine in fine_values
+    }
+    return make_remaining_ordered_benchmark_schedule(
+        coarse_values=coarse_values,
+        fine_values=fine_values,
+        n_trials=n_trials,
+        existing_counts=existing_counts,
+    )
 
-                    final_positions = fast_sweep(
-                        coarse_iterations=coarse,
-                        fine_iterations=fine,
-                        start_positions=start_positions,
-                        sweep_start=sweep_start,
-                        sweep_end=sweep_end,
-                        sample_interval=sample_interval,
-                        fine_window=fine_window,
-                        fine_settle_time=fine_settle_time,
-                        plot=False,
-                    )
 
-                    elapsed_seconds = time.perf_counter() - start_time
+def make_remaining_ordered_benchmark_schedule(coarse_values, fine_values, n_trials,
+                                              existing_counts=None):
+    """Return the ordered schedule for the trials still missing."""
+    if n_trials < 1:
+        raise ValueError("n_trials must be at least 1.")
 
-                    time.sleep(settle_time)
-                    final_power_dbm = measure_power_avg(duration_seconds=measure_duration)
+    combinations = [(coarse, fine) for fine in fine_values for coarse in coarse_values]
+    if not combinations:
+        raise ValueError("At least one coarse/fine combination is required.")
 
-                    row = {
-                        "trial": trial_idx + 1,
-                        "coarse": coarse,
-                        "fine": fine,
-                        "start_arm1": start_positions[0],
-                        "start_arm2": start_positions[1],
-                        "start_arm3": start_positions[2],
-                        "final_arm1": final_positions[0],
-                        "final_arm2": final_positions[1],
-                        "final_arm3": final_positions[2],
-                        "elapsed_seconds": round(elapsed_seconds, 3),
-                        "final_power_dbm": round(final_power_dbm, 4),
-                    }
-                    writer.writerow(row)
+    existing_counts = existing_counts or {}
+    schedule = []
+    for trial_number in range(1, n_trials + 1):
+        round_order = [
+            combo for combo in combinations
+            if existing_counts.get(combo, 0) < trial_number
+        ]
+        if not round_order:
+            continue
 
-                    print(
-                        f"  Trial {trial_idx + 1}/{n_trials}: "
-                        f"{elapsed_seconds:.2f} s, "
-                        f"{final_power_dbm:.2f} dBm, "
-                        f"positions {final_positions}"
-                    )
+        schedule.extend(round_order)
 
-    summary_fieldnames = [
-        "coarse", "fine",
-        "elapsed_mean", "elapsed_std",
-        "power_mean", "power_std"
-    ]
+    return schedule
+
+
+def make_interleaved_benchmark_schedule(coarse_values, fine_values, n_trials, rng=None):
+    """Backward-compatible wrapper for the deterministic benchmark order."""
+    return make_ordered_benchmark_schedule(coarse_values, fine_values, n_trials)
+
+
+def make_remaining_interleaved_benchmark_schedule(coarse_values, fine_values, n_trials,
+                                                  existing_counts=None, rng=None):
+    """Backward-compatible wrapper for the deterministic remaining order."""
+    return make_remaining_ordered_benchmark_schedule(
+        coarse_values=coarse_values,
+        fine_values=fine_values,
+        n_trials=n_trials,
+        existing_counts=existing_counts,
+    )
+
+
+def summarize_benchmark_csv(raw_csv_path="benchmark_raw.csv",
+                            summary_csv_path="benchmark_summary.csv",
+                            coarse_values=None,
+                            fine_values=None):
+    """Recompute benchmark_summary.csv from benchmark_raw.csv."""
+    import csv
 
     summary_data = {}
-    for coarse in coarse_values:
-        for fine in fine_values:
-            key = (coarse, fine)
-            summary_data[key] = {"elapsed": [], "power": []}
-
     with open(raw_csv_path, "r", newline="") as raw_f:
         reader = csv.DictReader(raw_f)
         for row in reader:
             key = (int(row["coarse"]), int(row["fine"]))
+            if key not in summary_data:
+                summary_data[key] = {"elapsed": [], "power": []}
             summary_data[key]["elapsed"].append(float(row["elapsed_seconds"]))
             summary_data[key]["power"].append(float(row["final_power_dbm"]))
+
+    if coarse_values is None:
+        coarse_values = sorted({key[0] for key in summary_data})
+    if fine_values is None:
+        fine_values = sorted({key[1] for key in summary_data})
+
+    summary_fieldnames = [
+        "coarse", "fine", "n_trials",
+        "elapsed_mean", "elapsed_std",
+        "power_mean", "power_std",
+        "power_median", "power_min", "power_max",
+    ]
 
     with open(summary_csv_path, "w", newline="") as summary_f:
         writer = csv.DictWriter(summary_f, fieldnames=summary_fieldnames)
@@ -791,21 +818,334 @@ def benchmark_fast_sweep(n_trials=5, coarse_values=None, fine_values=None,
         for coarse in coarse_values:
             for fine in fine_values:
                 key = (coarse, fine)
-                elapsed_list = summary_data[key]["elapsed"]
-                power_list = summary_data[key]["power"]
+                if key not in summary_data:
+                    continue
 
-                row = {
+                elapsed = np.asarray(summary_data[key]["elapsed"], dtype=float)
+                power = np.asarray(summary_data[key]["power"], dtype=float)
+
+                writer.writerow({
                     "coarse": coarse,
                     "fine": fine,
-                    "elapsed_mean": round(np.mean(elapsed_list), 3),
-                    "elapsed_std": round(np.std(elapsed_list), 3),
-                    "power_mean": round(np.mean(power_list), 4),
-                    "power_std": round(np.std(power_list), 4),
-                }
-                writer.writerow(row)
+                    "n_trials": int(power.size),
+                    "elapsed_mean": round(float(np.mean(elapsed)), 3),
+                    "elapsed_std": round(float(np.std(elapsed)), 3),
+                    "power_mean": round(float(np.mean(power)), 4),
+                    "power_std": round(float(np.std(power)), 4),
+                    "power_median": round(float(np.median(power)), 4),
+                    "power_min": round(float(np.min(power)), 4),
+                    "power_max": round(float(np.max(power)), 4),
+                })
+
+    return summary_data
+
+
+def benchmark_fast_sweep(n_trials=120, coarse_values=None, fine_values=None,
+                         settle_time=3.0, measure_duration=2.0,
+                         sweep_start=0, sweep_end=154, sample_interval=0.01,
+                         fine_window=5, fine_settle_time=0.1,
+                         raw_csv_path="benchmark_raw.csv",
+                         summary_csv_path="benchmark_summary.csv",
+                         random_seed=None,
+                         resume=True):
+    """Benchmark fast_sweep with all combinations of coarse and fine iterations.
+
+    The runs are ordered in repeated rounds as C1F1, C2F1, C3F1, ...,
+    then C1F2, C2F2, and so on. This makes the measurement order predictable
+    while still distributing repeated trials over the whole run.
+
+    For each (coarse, fine) combination:
+      - Run n_trials with random start positions in deterministic C/F order
+      - After optimization: wait settle_time, then measure for measure_duration
+      - Save raw trial data to raw_csv_path
+      - Save summary (mean, std) to summary_csv_path
+
+    If resume=True and raw_csv_path already exists, existing rows are kept and
+    only missing trials are appended until each setup reaches n_trials.
+    """
+    if coarse_values is None:
+        coarse_values = [1, 2, 3, 4, 5]
+    if fine_values is None:
+        fine_values = [1, 2, 3, 4, 5]
+
+    import csv
+
+    rng = np.random.default_rng(random_seed)
+    combinations = [(coarse, fine) for fine in fine_values for coarse in coarse_values]
+    trial_counts = {combo: 0 for combo in combinations}
+    last_run_order = 0
+
+    if resume and os.path.exists(raw_csv_path):
+        with open(raw_csv_path, "r", newline="") as existing_f:
+            reader = csv.DictReader(existing_f)
+            for row_idx, row in enumerate(reader, start=1):
+                key = (int(row["coarse"]), int(row["fine"]))
+                if key in trial_counts:
+                    trial_counts[key] = max(trial_counts[key], int(row["trial"]))
+                if "run_order" in row and row["run_order"]:
+                    last_run_order = max(last_run_order, int(row["run_order"]))
+                else:
+                    last_run_order = max(last_run_order, row_idx)
+
+    schedule = make_ordered_benchmark_schedule(
+        coarse_values=coarse_values,
+        fine_values=fine_values,
+        n_trials=n_trials,
+    ) if not resume else make_remaining_ordered_benchmark_schedule(
+        coarse_values=coarse_values,
+        fine_values=fine_values,
+        n_trials=n_trials,
+        existing_counts=trial_counts,
+    )
+    total_runs = len(schedule)
+
+    raw_fieldnames = [
+        "run_order", "test_started_at", "test_finished_at",
+        "trial", "coarse", "fine",
+        "start_arm1", "start_arm2", "start_arm3",
+        "final_arm1", "final_arm2", "final_arm3",
+        "elapsed_seconds", "final_power_dbm"
+    ]
+
+    file_exists = os.path.exists(raw_csv_path)
+    if resume and file_exists:
+        ensure_benchmark_csv_columns(raw_csv_path, raw_fieldnames)
+
+    write_header = not (resume and file_exists and os.path.getsize(raw_csv_path) > 0)
+    mode = "a" if resume and file_exists else "w"
+    writer_fieldnames = raw_fieldnames
+    if resume and file_exists and os.path.getsize(raw_csv_path) > 0:
+        with open(raw_csv_path, "r", newline="") as existing_f:
+            existing_fieldnames = csv.DictReader(existing_f).fieldnames
+        if existing_fieldnames:
+            writer_fieldnames = existing_fieldnames
+
+    if total_runs == 0:
+        print(f"\nAll requested benchmark trials already exist in {raw_csv_path}.")
+        summarize_benchmark_csv(
+            raw_csv_path=raw_csv_path,
+            summary_csv_path=summary_csv_path,
+            coarse_values=coarse_values,
+            fine_values=fine_values,
+        )
+        return
+
+    with open(raw_csv_path, mode, newline="") as raw_f:
+        writer = csv.DictWriter(raw_f, fieldnames=writer_fieldnames, extrasaction="ignore")
+        if write_header:
+            writer.writeheader()
+            raw_f.flush()
+            os.fsync(raw_f.fileno())
+
+        for run_order, (coarse, fine) in enumerate(schedule, start=1):
+            absolute_run_order = last_run_order + run_order
+            key = (coarse, fine)
+            trial_counts[key] += 1
+            trial_idx = trial_counts[key]
+
+            start_positions = [int(rng.integers(0, 155)) for _ in range(3)]
+            test_started_at = current_timestamp()
+
+            print(
+                f"\nRun {run_order}/{total_runs} (row {absolute_run_order}): "
+                f"C{coarse}F{fine}, trial {trial_idx}/{n_trials}"
+            )
+
+            set_arms(*start_positions)
+            start_time = time.perf_counter()
+
+            final_positions = fast_sweep(
+                coarse_iterations=coarse,
+                fine_iterations=fine,
+                start_positions=start_positions,
+                sweep_start=sweep_start,
+                sweep_end=sweep_end,
+                sample_interval=sample_interval,
+                fine_window=fine_window,
+                fine_settle_time=fine_settle_time,
+                plot=False,
+            )
+
+            elapsed_seconds = time.perf_counter() - start_time
+
+            time.sleep(settle_time)
+            final_power_dbm = measure_power_avg(duration_seconds=measure_duration)
+            test_finished_at = current_timestamp()
+
+            write_benchmark_row(writer, raw_f, {
+                "run_order": absolute_run_order,
+                "test_started_at": test_started_at,
+                "test_finished_at": test_finished_at,
+                "trial": trial_idx,
+                "coarse": coarse,
+                "fine": fine,
+                "start_arm1": start_positions[0],
+                "start_arm2": start_positions[1],
+                "start_arm3": start_positions[2],
+                "final_arm1": final_positions[0],
+                "final_arm2": final_positions[1],
+                "final_arm3": final_positions[2],
+                "elapsed_seconds": round(elapsed_seconds, 3),
+                "final_power_dbm": round(final_power_dbm, 4),
+            })
+
+            print(
+                f"  {elapsed_seconds:.2f} s, "
+                f"{final_power_dbm:.2f} dBm, "
+                f"positions {final_positions}"
+            )
+
+    summarize_benchmark_csv(
+        raw_csv_path=raw_csv_path,
+        summary_csv_path=summary_csv_path,
+        coarse_values=coarse_values,
+        fine_values=fine_values,
+    )
 
     print(f"\nRaw data saved to {raw_csv_path}")
     print(f"Summary saved to {summary_csv_path}")
 
 
-benchmark_fast_sweep()
+def run_top_benchmark(
+    n_top=10,
+    n_extra_trials=10,
+    summary_path="benchmark_summary.csv",
+    raw_path="benchmark_raw.csv",
+    settle_time=3.0,
+    measure_duration=2.0,
+    sweep_start=0,
+    sweep_end=154,
+    sample_interval=0.01,
+    fine_window=5,
+    fine_settle_time=0.1,
+):
+    import csv
+
+    # Step 1: Read summary and compute efficiency score = power_mean / elapsed_mean
+    summary_rows = []
+    with open(summary_path, "r", newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            summary_rows.append({
+                "coarse":       int(row["coarse"]),
+                "fine":         int(row["fine"]),
+                "elapsed_mean": float(row["elapsed_mean"]),
+                "power_mean":   float(row["power_mean"]),
+            })
+
+    summary_rows.sort(key=lambda r: r["power_mean"])
+    top_combos = summary_rows[:n_top]
+
+    # Step 2: Print selection table
+    print(f"\n{'='*55}")
+    print(f"Top {n_top} kombinationer (laveste power_mean dBm)")
+    print(f"{'='*55}")
+    print(f"{'Rank':>4}  {'Coarse':>6}  {'Fine':>4}  {'Power (dBm)':>11}  {'Tid (s)':>8}")
+    print(f"{'-'*55}")
+    for rank, row in enumerate(top_combos, start=1):
+        print(
+            f"{rank:>4}  {row['coarse']:>6}  {row['fine']:>4}  "
+            f"{row['power_mean']:>11.4f}  {row['elapsed_mean']:>8.3f}"
+        )
+    print(f"{'='*55}\n")
+
+    # Step 3: Find the highest existing trial number per (coarse, fine)
+    last_trial = {}
+    last_run_order = 0
+    with open(raw_path, "r", newline="") as f:
+        reader = csv.DictReader(f)
+        for row_idx, row in enumerate(reader, start=1):
+            key = (int(row["coarse"]), int(row["fine"]))
+            t = int(row["trial"])
+            if key not in last_trial or t > last_trial[key]:
+                last_trial[key] = t
+            if "run_order" in row and row["run_order"]:
+                last_run_order = max(last_run_order, int(row["run_order"]))
+            else:
+                last_run_order = max(last_run_order, row_idx)
+
+    raw_fieldnames = [
+        "run_order", "test_started_at", "test_finished_at",
+        "trial", "coarse", "fine",
+        "start_arm1", "start_arm2", "start_arm3",
+        "final_arm1", "final_arm2", "final_arm3",
+        "elapsed_seconds", "final_power_dbm",
+    ]
+
+    ensure_benchmark_csv_columns(raw_path, raw_fieldnames)
+
+    # Step 4: Run extra trials and append to raw CSV (no header re-write)
+    with open(raw_path, "a", newline="") as raw_f:
+        writer = csv.DictWriter(raw_f, fieldnames=raw_fieldnames)
+
+        for combo_rank, combo in enumerate(top_combos, start=1):
+            coarse = combo["coarse"]
+            fine   = combo["fine"]
+            key    = (coarse, fine)
+            next_trial = last_trial.get(key, 0) + 1
+
+            print(
+                f"[{combo_rank}/{n_top}] C{coarse}F{fine}  "
+                f"power_mean={combo['power_mean']:.4f} dBm  "
+                f"(trials {next_trial}-{next_trial + n_extra_trials - 1})"
+            )
+
+            for trial_offset in range(n_extra_trials):
+                trial_num = next_trial + trial_offset
+                last_run_order += 1
+                start_positions = [int(np.random.randint(0, 155)) for _ in range(3)]
+                test_started_at = current_timestamp()
+                set_arms(*start_positions)
+
+                t0 = time.perf_counter()
+                final_positions = fast_sweep(
+                    coarse_iterations=coarse,
+                    fine_iterations=fine,
+                    start_positions=start_positions,
+                    sweep_start=sweep_start,
+                    sweep_end=sweep_end,
+                    sample_interval=sample_interval,
+                    fine_window=fine_window,
+                    fine_settle_time=fine_settle_time,
+                    plot=False,
+                )
+                elapsed_seconds = time.perf_counter() - t0
+
+                time.sleep(settle_time)
+                final_power_dbm = measure_power_avg(duration_seconds=measure_duration)
+                test_finished_at = current_timestamp()
+
+                write_benchmark_row(writer, raw_f, {
+                    "run_order":       last_run_order,
+                    "test_started_at": test_started_at,
+                    "test_finished_at": test_finished_at,
+                    "trial":           trial_num,
+                    "coarse":          coarse,
+                    "fine":            fine,
+                    "start_arm1":      start_positions[0],
+                    "start_arm2":      start_positions[1],
+                    "start_arm3":      start_positions[2],
+                    "final_arm1":      final_positions[0],
+                    "final_arm2":      final_positions[1],
+                    "final_arm3":      final_positions[2],
+                    "elapsed_seconds": round(elapsed_seconds, 3),
+                    "final_power_dbm": round(final_power_dbm, 4),
+                })
+
+                print(
+                    f"  Trial {trial_num}: "
+                    f"{elapsed_seconds:.1f} s, "
+                    f"{final_power_dbm:.2f} dBm, "
+                    f"pos={final_positions}"
+                )
+
+            last_trial[key] = next_trial + n_extra_trials - 1
+
+    summarize_benchmark_csv(raw_csv_path=raw_path, summary_csv_path=summary_path)
+
+    print(f"\nFaerdig. {n_top * n_extra_trials} nye raekker tilfoejet til {raw_path}")
+    print(f"Summary genberegnet og gemt i {summary_path}")
+
+
+if __name__ == "__main__":
+    benchmark_fast_sweep(n_trials=120)

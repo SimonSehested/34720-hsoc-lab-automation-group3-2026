@@ -1,7 +1,11 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -c \"print\\(open\\(r'c:\\\\Users\\\\FTNK-LocalAdm\\\\Desktop\\\\34720-hsoc-lab-automation-group3-2026\\\\laser_polarization_optimizer.py'\\).read\\(\\)\\)\")"
+      "Bash(python -c \"print\\(open\\(r'c:\\\\Users\\\\FTNK-LocalAdm\\\\Desktop\\\\34720-hsoc-lab-automation-group3-2026\\\\laser_polarization_optimizer.py'\\).read\\(\\)\\)\")",
+      "Bash(Get-ChildItem -Path \"c:\\\\Users\\\\FTNK-LocalAdm\\\\Desktop\\\\34720-hsoc-lab-automation-group3-2026\" -Filter \"laser_polarization_optimizer.py\" -Recurse)",
+      "Bash(python plot_benchmark.py)",
+      "Bash(python report_plots.py)",
+      "Bash(python -c \"import matplotlib; print\\(matplotlib.__version__\\); import pandas; print\\(pandas.__version__\\)\")"
     ]
   }
 }
