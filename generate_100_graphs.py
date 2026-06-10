@@ -6,6 +6,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 from matplotlib.patches import Patch
+import math
 import os
 
 OUTPUT_DIR = "graphs_100"
@@ -14,6 +15,8 @@ os.makedirs(OUTPUT_DIR, exist_ok=True)
 RAW_PATH = "benchmark_raw.csv"
 SUMMARY_PATH = "benchmark_summary.csv"
 SUMMARY_C1C3_PATH = "benchmark_summary_c1_c3.csv"
+SUN_LATITUDE = 55.6761
+SUN_LONGITUDE = 12.5683
 
 raw = pd.read_csv(RAW_PATH)
 summary = pd.read_csv(SUMMARY_PATH)
@@ -75,6 +78,272 @@ def to_grid_median(raw_col):
 def save(fig, name):
     fig.savefig(os.path.join(OUTPUT_DIR, name), dpi=150, bbox_inches="tight")
     plt.close(fig)
+
+def solar_event_time(day, latitude, longitude, tzinfo, event):
+    """Approximate local sunrise/sunset using the NOAA solar calculation."""
+    day = pd.Timestamp(day).date()
+    day_of_year = day.timetuple().tm_yday
+    lng_hour = longitude / 15.0
+    target_hour = 6 if event == "sunrise" else 18
+    t = day_of_year + ((target_hour - lng_hour) / 24.0)
+
+    mean_anomaly = (0.9856 * t) - 3.289
+    true_longitude = (
+        mean_anomaly
+        + (1.916 * math.sin(math.radians(mean_anomaly)))
+        + (0.020 * math.sin(math.radians(2 * mean_anomaly)))
+        + 282.634
+    ) % 360
+
+    right_ascension = math.degrees(math.atan(0.91764 * math.tan(math.radians(true_longitude)))) % 360
+    longitude_quadrant = math.floor(true_longitude / 90) * 90
+    ascension_quadrant = math.floor(right_ascension / 90) * 90
+    right_ascension = (right_ascension + longitude_quadrant - ascension_quadrant) / 15.0
+
+    sin_declination = 0.39782 * math.sin(math.radians(true_longitude))
+    cos_declination = math.cos(math.asin(sin_declination))
+    zenith = 90.833
+    cos_hour_angle = (
+        math.cos(math.radians(zenith))
+        - (sin_declination * math.sin(math.radians(latitude)))
+    ) / (cos_declination * math.cos(math.radians(latitude)))
+
+    if cos_hour_angle > 1 or cos_hour_angle < -1:
+        return None
+
+    hour_angle = math.degrees(math.acos(cos_hour_angle))
+    if event == "sunrise":
+        hour_angle = 360 - hour_angle
+    hour_angle /= 15.0
+
+    local_mean_time = hour_angle + right_ascension - (0.06571 * t) - 6.622
+    utc_hour = local_mean_time - lng_hour
+    utc_midnight = pd.Timestamp(day, tz="UTC")
+    return (utc_midnight + pd.Timedelta(hours=utc_hour)).tz_convert(tzinfo)
+
+def add_sunrise_sunset(ax, start_time, end_time, tzinfo):
+    dates = pd.date_range(
+        start=start_time.date() - pd.Timedelta(days=1),
+        end=end_time.date() + pd.Timedelta(days=1),
+        freq="D",
+    )
+    sunrise_label_used = False
+    sunset_label_used = False
+    daylight_label_used = False
+
+    for day in dates:
+        sunrise = solar_event_time(day, SUN_LATITUDE, SUN_LONGITUDE, tzinfo, "sunrise")
+        sunset = solar_event_time(day, SUN_LATITUDE, SUN_LONGITUDE, tzinfo, "sunset")
+        if sunrise is None or sunset is None:
+            continue
+        if sunset < sunrise:
+            sunset += pd.Timedelta(days=1)
+
+        daylight_start = max(sunrise, start_time)
+        daylight_end = min(sunset, end_time)
+        if daylight_start < daylight_end:
+            ax.axvspan(
+                daylight_start,
+                daylight_end,
+                color="#ffd166",
+                alpha=0.16,
+                linewidth=0,
+                zorder=0,
+                label="Daylight" if not daylight_label_used else None,
+            )
+            daylight_label_used = True
+
+        if start_time <= sunrise <= end_time:
+            ax.axvline(
+                sunrise,
+                color="#f2a900",
+                linestyle=":",
+                linewidth=1.2,
+                alpha=0.9,
+                label="Sunrise" if not sunrise_label_used else None,
+            )
+            sunrise_label_used = True
+        if start_time <= sunset <= end_time:
+            ax.axvline(
+                sunset,
+                color="#d95f02",
+                linestyle="--",
+                linewidth=1.2,
+                alpha=0.9,
+                label="Sunset" if not sunset_label_used else None,
+            )
+            sunset_label_used = True
+
+def daylight_intervals(start_time, end_time, tzinfo):
+    dates = pd.date_range(
+        start=start_time.date() - pd.Timedelta(days=1),
+        end=end_time.date() + pd.Timedelta(days=1),
+        freq="D",
+    )
+    intervals = []
+    for day in dates:
+        sunrise = solar_event_time(day, SUN_LATITUDE, SUN_LONGITUDE, tzinfo, "sunrise")
+        sunset = solar_event_time(day, SUN_LATITUDE, SUN_LONGITUDE, tzinfo, "sunset")
+        if sunrise is not None and sunset is not None:
+            if sunset < sunrise:
+                sunset += pd.Timedelta(days=1)
+            intervals.append((sunrise, sunset))
+    return intervals
+
+def daylight_flags(times, intervals):
+    return pd.Series(
+        [any(sunrise <= timestamp <= sunset for sunrise, sunset in intervals) for timestamp in times],
+        index=times.index,
+    )
+
+def local_minute(timestamp):
+    return timestamp.hour * 60 + timestamp.minute + timestamp.second / 60
+
+def insert_gap_breaks(series, max_gap):
+    series = series.dropna().sort_index()
+    if len(series) < 2:
+        return series
+
+    broken_index = []
+    broken_values = []
+    for idx, (timestamp, value) in enumerate(series.items()):
+        broken_index.append(timestamp)
+        broken_values.append(value)
+        if idx == len(series) - 1:
+            continue
+
+        next_timestamp = series.index[idx + 1]
+        if next_timestamp - timestamp > max_gap:
+            broken_index.append(timestamp + ((next_timestamp - timestamp) / 2))
+            broken_values.append(np.nan)
+
+    return pd.Series(broken_values, index=pd.DatetimeIndex(broken_index))
+
+def plot_day_night_power_behavior(
+    time_ordered_raw,
+    filename,
+    title,
+    measurement_color="0.25",
+    measurement_alpha=0.16,
+    measurement_size=8,
+):
+    if len(time_ordered_raw) == 0:
+        return
+
+    time_indexed_power = time_ordered_raw.set_index("test_started_at")["final_power_dbm"].sort_index()
+    dense_trend = (
+        time_indexed_power
+        .resample("1min")
+        .median()
+        .rolling("20min", min_periods=2)
+        .median()
+    )
+    if dense_trend.notna().sum() >= 10:
+        robust_trend = dense_trend
+        trend_label = "20 min rolling median"
+    else:
+        sample_window = min(7, max(3, len(time_indexed_power) // 20))
+        robust_trend = time_indexed_power.rolling(window=sample_window, min_periods=2, center=True).median()
+        robust_trend = insert_gap_breaks(robust_trend, pd.Timedelta(hours=3))
+        trend_label = f"{sample_window}-measurement rolling median"
+
+    plot_start = time_indexed_power.index.min()
+    plot_end = time_indexed_power.index.max()
+    tzinfo = time_indexed_power.index.tz
+    sun_intervals = daylight_intervals(plot_start, plot_end, tzinfo)
+    is_daylight = daylight_flags(time_ordered_raw["test_started_at"], sun_intervals)
+    day_values = time_ordered_raw.loc[is_daylight, "final_power_dbm"]
+    night_values = time_ordered_raw.loc[~is_daylight, "final_power_dbm"]
+
+    profile = time_ordered_raw.copy()
+    profile["minute_of_day"] = profile["test_started_at"].map(local_minute)
+    profile["clock_bin"] = (profile["minute_of_day"] // 30).astype(int) * 30
+    clock_profile = (
+        profile.groupby("clock_bin")["final_power_dbm"]
+        .agg(median="median", q25=lambda x: x.quantile(0.25), q75=lambda x: x.quantile(0.75), n="size")
+        .reset_index()
+    )
+    clock_profile["clock_center"] = clock_profile["clock_bin"] + 15
+    sunrise_minutes = [local_minute(sunrise) for sunrise, _ in sun_intervals if plot_start <= sunrise <= plot_end]
+    sunset_minutes = [local_minute(sunset) for _, sunset in sun_intervals if plot_start <= sunset <= plot_end]
+    mean_sunrise = float(np.mean(sunrise_minutes)) if sunrise_minutes else 6 * 60
+    mean_sunset = float(np.mean(sunset_minutes)) if sunset_minutes else 18 * 60
+
+    fig, (ax_top, ax_bottom) = plt.subplots(
+        2,
+        1,
+        figsize=(14, 8),
+        constrained_layout=True,
+        gridspec_kw={"height_ratios": [2.1, 1]},
+    )
+    fig.suptitle(title, fontsize=15, fontweight="bold")
+
+    ax_top.axvspan(plot_start, plot_end, color="#d7e8f7", alpha=0.22, linewidth=0, zorder=0, label="Night")
+    add_sunrise_sunset(ax_top, plot_start, plot_end, tzinfo)
+    ax_top.scatter(
+        time_ordered_raw["test_started_at"],
+        time_ordered_raw["final_power_dbm"],
+        s=measurement_size,
+        color=measurement_color,
+        alpha=measurement_alpha,
+        linewidths=0,
+        label="Measurements",
+    )
+    ax_top.plot(robust_trend.index, robust_trend, color="#7b1fa2", linewidth=2.2, label=trend_label)
+    ax_top.set_xlim(plot_start, plot_end)
+    ax_top.set_ylabel("Final power (dBm)")
+    ax_top.set_title("Timeline with gaps preserved")
+    ax_top.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M", tz=tzinfo))
+    ax_top.grid(True, alpha=0.25)
+    ax_top.legend(loc="upper right", ncol=2)
+
+    day_median_text = f"{day_values.median():.2f} dBm" if len(day_values) else "n/a"
+    night_median_text = f"{night_values.median():.2f} dBm" if len(night_values) else "n/a"
+    ax_top.text(
+        0.012,
+        0.04,
+        f"Day median: {day_median_text}\nNight median: {night_median_text}",
+        transform=ax_top.transAxes,
+        fontsize=9,
+        bbox={"facecolor": "white", "edgecolor": "0.75", "alpha": 0.88, "boxstyle": "round,pad=0.35"},
+    )
+
+    ax_bottom.axvspan(0, mean_sunrise, color="#d7e8f7", alpha=0.35, linewidth=0, label="Night")
+    ax_bottom.axvspan(mean_sunrise, mean_sunset, color="#ffd166", alpha=0.24, linewidth=0, label="Daylight")
+    ax_bottom.axvspan(mean_sunset, 24 * 60, color="#d7e8f7", alpha=0.35, linewidth=0)
+    ax_bottom.fill_between(
+        clock_profile["clock_center"],
+        clock_profile["q25"],
+        clock_profile["q75"],
+        color="#7b1fa2",
+        alpha=0.16,
+        linewidth=0,
+        label="25-75%",
+    )
+    ax_bottom.plot(
+        clock_profile["clock_center"],
+        clock_profile["median"],
+        color="#7b1fa2",
+        linewidth=2,
+        marker="o",
+        markersize=3.5,
+        label="30 min bin median",
+    )
+    ax_bottom.axvline(mean_sunrise, color="#f2a900", linestyle=":", linewidth=1.4, label="Avg sunrise")
+    ax_bottom.axvline(mean_sunset, color="#d95f02", linestyle="--", linewidth=1.4, label="Avg sunset")
+    ax_bottom.set_xlim(0, 24 * 60)
+    ax_bottom.set_xlabel("Time of day")
+    ax_bottom.set_ylabel("Final power (dBm)")
+    ax_bottom.set_title("Typical daily pattern folded across the measured days")
+    tick_minutes = np.arange(0, 24 * 60 + 1, 3 * 60)
+    ax_bottom.set_xticks(tick_minutes)
+    ax_bottom.set_xticklabels([f"{int(minute // 60):02d}:00" for minute in tick_minutes])
+    ax_bottom.grid(True, alpha=0.25)
+    ax_bottom.legend(loc="best", ncol=3)
+    for label in ax_top.get_xticklabels():
+        label.set_rotation(25)
+        label.set_ha("right")
+    save(fig, filename)
 
 print("Generating 100 graphs...")
 
@@ -302,6 +571,80 @@ ax.set_ylabel("dBm")
 ax.grid(True, alpha=0.3)
 save(fig, "026_moving_average_power.png")
 
+if "test_started_at" in raw.columns and raw["test_started_at"].notna().any():
+    time_ordered_raw = raw.dropna(subset=["test_started_at"]).sort_values("test_started_at")
+    time_rolling = time_ordered_raw["final_power_dbm"].rolling(window=window, min_periods=3, center=True).mean()
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.plot(time_ordered_raw["test_started_at"], time_rolling, color="purple", linewidth=2)
+    ax.set_title(f"Moving Average Power Over Time (window={window})")
+    ax.set_xlabel("Test start time")
+    ax.set_ylabel("dBm")
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M"))
+    fig.autofmt_xdate()
+    ax.grid(True, alpha=0.3)
+    save(fig, "026b_moving_average_power_time.png")
+
+    time_indexed_power = time_ordered_raw.set_index("test_started_at")["final_power_dbm"].sort_index()
+    ten_minute_rolling = (
+        time_indexed_power
+        .resample("1min")
+        .mean()
+        .rolling("10min", min_periods=1)
+        .mean()
+    )
+
+    fig, ax = plt.subplots(figsize=(12, 5))
+    ax.plot(ten_minute_rolling.index, ten_minute_rolling, color="purple", linewidth=2, label="10 min rolling average")
+    plot_start = ten_minute_rolling.index.min()
+    plot_end = ten_minute_rolling.index.max()
+    add_sunrise_sunset(ax, plot_start, plot_end, time_indexed_power.index.tz)
+    ax.set_xlim(plot_start, plot_end)
+    ax.set_title("10 Minute Rolling Average Power Over Time")
+    ax.set_xlabel("Test start time")
+    ax.set_ylabel("dBm")
+    ax.xaxis.set_major_formatter(mdates.DateFormatter("%m-%d %H:%M", tz=time_indexed_power.index.tz))
+    fig.autofmt_xdate()
+    ax.grid(True, alpha=0.3)
+    ax.legend(loc="best")
+    save(fig, "026c_10min_rolling_average_power_time_sun.png")
+
+    plot_day_night_power_behavior(
+        time_ordered_raw,
+        "026d_day_night_power_behavior.png",
+        "Power behavior through day and night",
+    )
+
+    c2f2_time_ordered_raw = time_ordered_raw[
+        (time_ordered_raw["coarse"] == 2) & (time_ordered_raw["fine"] == 2)
+    ].copy()
+    plot_day_night_power_behavior(
+        c2f2_time_ordered_raw,
+        "026e_day_night_power_behavior_c2f2.png",
+        "C2F2 power behavior through day and night",
+    )
+
+    max_by_config = (
+        time_ordered_raw.groupby(["coarse", "fine", "config"])["final_power_dbm"]
+        .max()
+        .reset_index(name="max_power")
+        .sort_values("max_power")
+    )
+    lowest_max = max_by_config.iloc[0]
+    lowest_max_time_ordered_raw = time_ordered_raw[
+        (time_ordered_raw["coarse"] == lowest_max["coarse"])
+        & (time_ordered_raw["fine"] == lowest_max["fine"])
+    ].copy()
+    lowest_max_config = lowest_max["config"]
+    plot_day_night_power_behavior(
+        lowest_max_time_ordered_raw,
+        "026f_day_night_power_behavior_lowest_max.png",
+        f"{lowest_max_config} power behavior through day and night (lowest max = {lowest_max['max_power']:.2f} dBm)",
+        measurement_color="#1f77b4",
+        measurement_alpha=0.95,
+        measurement_size=16,
+    )
+
 fig, ax = plt.subplots(figsize=(10, 6))
 for c in coarse_vals:
     subset = raw[raw["coarse"] == c]
@@ -507,7 +850,7 @@ for (i, j), v in np.ndenumerate(n_trials_grid):
 plt.colorbar(im, label="n trials")
 save(fig, "045_heatmap_trial_count.png")
 
-success_rate_grid = np.zeros_like(power_mean_grid)
+success_rate_grid = np.zeros_like(power_median_grid)
 for i, f in enumerate(fine_vals):
     for j, c in enumerate(coarse_vals):
         subset = raw[(raw["fine"] == f) & (raw["coarse"] == c)]
@@ -730,9 +1073,8 @@ save(fig, "064_correlation_heatmap.png")
 
 configs_sorted = summary.sort_values("power_mean")["config"].tolist()
 config_means = summary.set_index("config").loc[configs_sorted, "power_mean"].values.reshape(-1, 1)
-from sklearn.preprocessing import StandardScaler
-scaler = StandardScaler()
-scaled = scaler.fit_transform(config_means)
+config_mean_std = config_means.std()
+scaled = (config_means - config_means.mean()) / config_mean_std if config_mean_std else config_means * 0
 fig, ax = plt.subplots(figsize=(10, 6))
 ax.imshow(scaled, cmap="RdYlGn_r", aspect="auto")
 ax.set_yticks(range(len(configs_sorted)))
