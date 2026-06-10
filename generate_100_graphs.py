@@ -68,6 +68,10 @@ def to_grid(col):
         fine_vals, coarse_vals
     ].values
 
+def to_grid_median(raw_col):
+    medians = raw.groupby(["coarse", "fine"])[raw_col].median().reset_index()
+    return medians.pivot(index="fine", columns="coarse", values=raw_col).loc[fine_vals, coarse_vals].values
+
 def save(fig, name):
     fig.savefig(os.path.join(OUTPUT_DIR, name), dpi=150, bbox_inches="tight")
     plt.close(fig)
@@ -443,32 +447,32 @@ ax.set_ylabel("dBm")
 plt.colorbar(im, label="Count")
 save(fig, "041_hexbin_movement_vs_power.png")
 
-power_mean_grid = to_grid("power_mean")
+power_median_grid = to_grid_median("final_power_dbm")
 fig, ax = plt.subplots(figsize=(8, 6))
-im = ax.imshow(power_mean_grid, cmap="RdYlGn_r", aspect="auto", origin="lower")
+im = ax.imshow(power_median_grid, cmap="RdYlGn_r", aspect="auto", origin="lower")
 ax.set_xticks(range(len(coarse_vals)))
 ax.set_xticklabels([f"C{c}" for c in coarse_vals])
 ax.set_yticks(range(len(fine_vals)))
 ax.set_yticklabels([f"F{f}" for f in fine_vals])
-ax.set_title("Mean Power Heatmap (C vs F)")
+ax.set_title("Median Power Heatmap (C vs F)")
 ax.set_xlabel("Coarse")
 ax.set_ylabel("Fine")
-for (i, j), v in np.ndenumerate(power_mean_grid):
+for (i, j), v in np.ndenumerate(power_median_grid):
     ax.text(j, i, f"{v:.1f}", ha="center", va="center", fontsize=9, color="black")
 plt.colorbar(im, label="dBm")
 save(fig, "042_heatmap_power_mean.png")
 
-elapsed_mean_grid = to_grid("elapsed_mean")
+elapsed_median_grid = to_grid_median("elapsed_seconds")
 fig, ax = plt.subplots(figsize=(8, 6))
-im = ax.imshow(elapsed_mean_grid, cmap="YlOrRd", aspect="auto", origin="lower")
+im = ax.imshow(elapsed_median_grid, cmap="YlOrRd", aspect="auto", origin="lower")
 ax.set_xticks(range(len(coarse_vals)))
 ax.set_xticklabels([f"C{c}" for c in coarse_vals])
 ax.set_yticks(range(len(fine_vals)))
 ax.set_yticklabels([f"F{f}" for f in fine_vals])
-ax.set_title("Mean Runtime Heatmap (C vs F)")
+ax.set_title("Median Runtime Heatmap (C vs F)")
 ax.set_xlabel("Coarse")
 ax.set_ylabel("Fine")
-for (i, j), v in np.ndenumerate(elapsed_mean_grid):
+for (i, j), v in np.ndenumerate(elapsed_median_grid):
     ax.text(j, i, f"{v:.0f}", ha="center", va="center", fontsize=9, color="black")
 plt.colorbar(im, label="Seconds")
 save(fig, "043_heatmap_runtime_mean.png")
