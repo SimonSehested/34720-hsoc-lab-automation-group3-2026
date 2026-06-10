@@ -43,3 +43,43 @@ def _set_arm(arm_idx: int, position: int) -> None:
 
 def _needs_edge_check(positions: list) -> bool:
     return any(p < _EDGE_MARGIN or p > _SWEEP_END - _EDGE_MARGIN for p in positions)
+
+
+def _coarse_sweep(arm_idx: int, positions: list) -> int:
+    """Sweep arm from _SWEEP_START to _SWEEP_END while sampling power.
+    Returns the position with the lowest measured power."""
+    readings = []
+    timestamps = []
+    stop_event = threading.Event()
+
+    def _sample(t0: float) -> None:
+        while not stop_event.is_set():
+            timestamps.append(time.time() - t0)
+            readings.append(_get_power())
+            time.sleep(_SAMPLE_INTERVAL)
+
+    positions[arm_idx] = _SWEEP_START
+    _set_arms(*positions)
+
+    t0 = time.time()
+    sampler = threading.Thread(target=_sample, args=(t0,), daemon=True)
+    sampler.start()
+    try:
+        _set_arm(arm_idx, _SWEEP_END)
+    finally:
+        stop_event.set()
+        sampler.join()
+
+    positions[arm_idx] = _SWEEP_END
+
+    ts = np.asarray(timestamps, dtype=float)
+    pwr = np.asarray(readings, dtype=float)
+    if ts.size == 0:
+        return _SWEEP_END // 2  # fallback to midpoint if no samples collected
+
+    pos_trace = (
+        _SWEEP_START + (_SWEEP_END - _SWEEP_START) * (ts / ts[-1])
+        if ts[-1] > 0
+        else np.full_like(ts, float(_SWEEP_START))
+    )
+    return int(round(pos_trace[int(np.argmin(pwr))]))
