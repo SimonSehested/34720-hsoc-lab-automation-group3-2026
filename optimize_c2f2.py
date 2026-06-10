@@ -83,3 +83,45 @@ def _coarse_sweep(arm_idx: int, positions: list) -> int:
         else np.full_like(ts, float(_SWEEP_START))
     )
     return int(round(pos_trace[int(np.argmin(pwr))]))
+
+
+def _fine_refine(arm_idx: int, positions: list) -> int:
+    """Measure power at center ± _FINE_WINDOW. Expands window if the minimum
+    lands at the boundary. Returns the position with the lowest power."""
+    center = positions[arm_idx]
+    measured: dict = {}
+
+    def _measure_range(lo: int, hi: int) -> None:
+        for pos in range(lo, hi + 1):
+            if pos in measured:
+                continue
+            scan = list(positions)
+            scan[arm_idx] = pos
+            _set_arms(*scan)
+            time.sleep(_FINE_SETTLE)
+            measured[pos] = _get_power()
+
+    lo = max(0, center - _FINE_WINDOW)
+    hi = min(_SWEEP_END, center + _FINE_WINDOW)
+    _measure_range(lo, hi)
+
+    while True:
+        pos_arr = np.array(sorted(measured), dtype=int)
+        pwr_arr = np.array([measured[p] for p in pos_arr], dtype=float)
+        best_idx = int(np.argmin(pwr_arr))
+        best_pos = int(pos_arr[best_idx])
+
+        expanded = False
+        if best_idx == 0 and lo > 0:
+            new_lo = max(0, lo - _FINE_WINDOW)
+            _measure_range(new_lo, lo - 1)
+            lo = new_lo
+            expanded = True
+        elif best_idx == len(pos_arr) - 1 and hi < _SWEEP_END:
+            new_hi = min(_SWEEP_END, hi + _FINE_WINDOW)
+            _measure_range(hi + 1, new_hi)
+            hi = new_hi
+            expanded = True
+
+        if not expanded:
+            return best_pos
