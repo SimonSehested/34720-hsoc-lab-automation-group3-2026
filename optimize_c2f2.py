@@ -125,3 +125,73 @@ def _fine_refine(arm_idx: int, positions: list) -> int:
 
         if not expanded:
             return best_pos
+
+
+def optimize_polarization(
+    coarse_iterations: int = 2,
+    fine_iterations: int = 2,
+    max_restarts: int = 3,
+    start_positions=None,
+) -> list:
+    """Optimize laser polarization using the C2F2 algorithm.
+
+    Runs coarse_iterations full sweeps (0-154) then fine_iterations
+    refinements per attempt. Restarts up to max_restarts times if any arm
+    lands in the edge zone (< 5 or > 149). When the cap is reached, takes
+    the best positions found so far and runs one final fine pass.
+
+    Returns [arm1, arm2, arm3] -- final positions (0-154).
+    """
+    positions = (
+        list(start_positions)
+        if start_positions is not None
+        else [random.randint(0, _SWEEP_END) for _ in range(3)]
+    )
+    best_result = None  # (positions, power)
+    restarts_used = 0
+
+    while True:
+        _set_arms(*positions)
+
+        # --- Coarse phase ---
+        for _ in range(coarse_iterations):
+            for arm_idx in range(3):
+                positions[arm_idx] = _coarse_sweep(arm_idx, positions)
+                _set_arms(*positions)
+
+        # Edge check #1 (after coarse)
+        if _needs_edge_check(positions):
+            if restarts_used < max_restarts:
+                restarts_used += 1
+                positions = [random.randint(0, _SWEEP_END) for _ in range(3)]
+                continue
+            fallback = list(best_result[0]) if best_result else list(positions)
+            for arm_idx in range(3):
+                fallback[arm_idx] = _fine_refine(arm_idx, fallback)
+                _set_arms(*fallback)
+            return fallback
+
+        # --- Fine phase ---
+        for _ in range(fine_iterations):
+            for arm_idx in range(3):
+                positions[arm_idx] = _fine_refine(arm_idx, positions)
+                _set_arms(*positions)
+
+        # Track the best result by power
+        power = _get_power()
+        if best_result is None or power < best_result[1]:
+            best_result = (list(positions), power)
+
+        # Edge check #2 (after fine)
+        if _needs_edge_check(positions):
+            if restarts_used < max_restarts:
+                restarts_used += 1
+                positions = [random.randint(0, _SWEEP_END) for _ in range(3)]
+                continue
+            fallback = list(best_result[0])
+            for arm_idx in range(3):
+                fallback[arm_idx] = _fine_refine(arm_idx, fallback)
+                _set_arms(*fallback)
+            return fallback
+
+        return positions
