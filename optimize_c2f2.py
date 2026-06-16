@@ -30,16 +30,16 @@ except Exception as e:
 
 _SWEEP_START      = 0
 _SWEEP_END        = 154
-_SAMPLE_INTERVAL  = 0.01   # seconds between readings during coarse sweep
+_SAMPLE_INTERVAL  = 0.002  # seconds between readings during coarse sweep
 _FINE_WINDOW      = 5      # positions either side for fine refinement
 _FINE_SETTLE      = 0.1    # settle time before each fine measurement (s)
-_EDGE_MARGIN      = 5      # distance from 0/154 that counts as edge zone
-_SIGNAL_THRESHOLD = -25.0  # dBm — minimum power required to trigger edge restart
-_SIGNAL_TIMEOUT   = 5.0    # seconds to wait for valid signal before skipping edge check
+_MAX_POWER_DBM    = -20.0  # dBm — if power exceeds this, randomize and retry
+_THRESHOLD_SETTLE = 2.0    # seconds to settle before the final -20 dBm check
 
 
 def _get_power(power_meter) -> float:
-    return float(power_meter.query('READ?'))
+    watts = float(power_meter.query('READ?'))
+    return 10.0 * np.log10(watts / 1e-3)  # W → dBm
 
 
 def _set_arms(arm1: int, arm2: int, arm3: int) -> None:
@@ -54,22 +54,6 @@ def _set_arm(arm_idx: int, position: int) -> None:
     if pol_ctrl is None:
         raise RuntimeError("MPC320 not connected.")
     pol_ctrl.set_position(arm_idx + 1, int(position))
-
-
-def _needs_edge_check(positions: list) -> bool:
-    return any(p < _EDGE_MARGIN or p > _SWEEP_END - _EDGE_MARGIN for p in positions)
-
-
-def _has_signal(power_meter) -> bool:
-    """Poll power meter for up to _SIGNAL_TIMEOUT seconds.
-    Returns True only if a reading below _SIGNAL_THRESHOLD is observed.
-    Edge restarts are skipped when no valid signal is detected."""
-    deadline = time.time() + _SIGNAL_TIMEOUT
-    while time.time() < deadline:
-        if _get_power(power_meter) < _SIGNAL_THRESHOLD:
-            return True
-        time.sleep(0.05)
-    return False
 
 
 def _coarse_sweep(arm_idx: int, positions: list, power_meter) -> int:
@@ -158,37 +142,48 @@ def optimize_polarization(
     power_meter,
     coarse_iterations: int = 2,
     fine_iterations: int = 2,
-    max_restarts: int = 3,
     start_positions=None,
-    arm_order: list = None,
+    threshold_dbm: float = _MAX_POWER_DBM,
 ) -> list:
-    """Optimize laser polarization using the C2F2 algorithm.
+    """Optimize laser polarization using the C2F2 algorithm (HQQ paddle order).
 
-    power_meter may be a VISA resource address string or an already-opened
-    pyvisa resource object.
+    Parameters
+    ----------
+    power_meter : str or pyvisa resource
+        VISA address string (e.g. 'USB0::0x1313::...::INSTR') or an already-
+        opened pyvisa resource object for the optical power meter.
+    coarse_iterations : int, default 2
+        Number of full coarse sweeps (positions 0-154) per attempt. More
+        iterations improve the starting estimate for fine refinement but take
+        longer.
+    fine_iterations : int, default 2
+        Number of fine refinement passes per attempt. Each pass steps through
+        ±_FINE_WINDOW positions around the current best and expands if the
+        minimum sits at the boundary.
+    start_positions : list of 3 ints or None, default None
+        Initial [arm1, arm2, arm3] positions (0-154). If None, positions are
+        chosen randomly at the start of each attempt.
+    threshold_dbm : float, default -20.0
+        Acceptance threshold in dBm. The function returns as soon as the
+        measured power is at or below this value. Lower (more negative) values
+        require a better extinction before accepting (e.g. -25 is stricter
+        than -20).
 
-    arm_order controls the paddle sweep sequence: [0,1,2] = QHQ (default),
-    [1,0,2] = HQQ (middle paddle first).
-
-    Runs coarse_iterations full sweeps (0-154) then fine_iterations
-    refinements per attempt. Restarts up to max_restarts times if any arm
-    lands in the edge zone (< 5 or > 149). When the cap is reached, takes
-    the best positions found so far and runs one final fine pass.
-
-    Returns [arm1, arm2, arm3] -- final positions (0-154).
+    Returns
+    -------
+    list
+        Final [arm1, arm2, arm3] paddle positions (0-154).
     """
     if isinstance(power_meter, str):
         power_meter = visa.ResourceManager().open_resource(power_meter)
 
-    _order = arm_order if arm_order is not None else [0, 1, 2]
+    _order = [1, 0, 2]  # HQQ: middle paddle first
 
     positions = (
         list(start_positions)
         if start_positions is not None
         else [random.randint(0, _SWEEP_END) for _ in range(3)]
     )
-    best_result = None  # (positions, power)
-    restarts_used = 0
 
     while True:
         _set_arms(*positions)
@@ -199,41 +194,15 @@ def optimize_polarization(
                 positions[arm_idx] = _coarse_sweep(arm_idx, positions, power_meter)
                 _set_arms(*positions)
 
-        # Edge check #1 (after coarse) — only restart if signal < -25 dBm within 5 s
-        if _needs_edge_check(positions) and _has_signal(power_meter):
-            if restarts_used < max_restarts:
-                restarts_used += 1
-                positions = [random.randint(0, _SWEEP_END) for _ in range(3)]
-                continue
-            fallback = list(best_result[0]) if best_result else list(positions)
-            for arm_idx in _order:
-                fallback[arm_idx] = _fine_refine(arm_idx, fallback, power_meter)
-                _set_arms(*fallback)
-            return fallback
-
         # --- Fine phase ---
         for _ in range(fine_iterations):
             for arm_idx in _order:
                 positions[arm_idx] = _fine_refine(arm_idx, positions, power_meter)
                 _set_arms(*positions)
 
-        # Track the best result by power
-        power = _get_power(power_meter)
-        if best_result is None or power < best_result[1]:
-            best_result = (list(positions), power)
+        time.sleep(_THRESHOLD_SETTLE)
+        final_power = _get_power(power_meter)
+        if final_power <= threshold_dbm:
+            return positions
 
-        # Edge check #2 (after fine) — only restart if signal < -25 dBm within 5 s
-        if _needs_edge_check(positions) and _has_signal(power_meter):
-            if restarts_used < max_restarts:
-                restarts_used += 1
-                positions = [random.randint(0, _SWEEP_END) for _ in range(3)]
-                continue
-            fallback = list(best_result[0])
-            for arm_idx in range(3):
-                fallback[arm_idx] = _fine_refine(arm_idx, fallback, power_meter)
-                _set_arms(*fallback)
-            return fallback
-
-        return positions
-    
-optimize_polarization('USB0::0x1313::0x8078::P0028333::INSTR')
+        positions = [random.randint(0, _SWEEP_END) for _ in range(3)]
