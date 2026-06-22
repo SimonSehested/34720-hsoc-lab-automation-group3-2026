@@ -1,6 +1,12 @@
 output/
 data/
+docs/
 __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+conftest.py
+*.png
+*.csv
+*.HEIC
+*.log
