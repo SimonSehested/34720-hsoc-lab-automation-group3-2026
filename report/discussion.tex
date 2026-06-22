@@ -1,0 +1,35 @@
+\section{Discussion}
+
+\subsection{Suitability of the feedback-based method}
+
+The C+F algorithm relies on real-time feedback from the power meter rather than a theoretical model of the waveplates. This feedback-based approach proved more reliable than model-based fitting, which failed to converge consistently. The waveplates in the MPC320 are not ideal quarter-wave and half-wave plates: their retardance deviates from the nominal values, and the three plates interact in a way that produces a non-periodic power landscape. A $\sin$-curve fit assumes a well-defined periodicity that does not hold in practice. The feedback method makes no assumptions about the functional form and is therefore robust to these hardware imperfections.
+
+\subsection{Trade-off between power and runtime}
+
+The heatmaps in Figures~\ref{fig:heatmap_power} and~\ref{fig:heatmap_runtime} illustrate the central trade-off: increasing the number of coarse or fine iterations improves the median power but at the cost of longer runtime. The power improvement shows clear diminishing returns. From C1F1 to C2F2 the median improves by 3.0\,dB (from $-26.9$ to $-29.9$\,dBm), while the median runtime increases from 19\,s to 36\,s. Going further to C3F3 yields only an additional 0.2\,dB improvement but adds another 22\,s.
+
+As shown in Figure~\ref{fig:power_lines}, the marginal gain from each additional fine iteration decreases: F1 to F2 contributes approximately 1.5\,dB, whereas F4 to F5 contributes less than 0.2\,dB. Configurations with very high iteration counts (C3F4, C3F5) achieve similar or slightly worse median power than C3F3, while taking longer. This indicates that additional iterations may overshoot or be affected by drift during the optimization itself.
+
+For a system that re-optimizes periodically, the time saved per cycle accumulates. C2F2 offers the best balance for frequent re-optimization, while C3F3 may be preferable for one-off alignments where runtime is less critical.
+
+\subsection{Paddle order}
+
+The HQQ order (half-wave plate first) outperformed QHQ by 1.0\,dB in mean and 1.2\,dB in median, as shown in Figure~\ref{fig:arm_order_boxplot}. This is consistent with the physical role of the half-wave plate: it rotates the polarization direction, which has a larger effect on the power landscape than the phase shifts introduced by the quarter-wave plates. By optimizing the most influential element first, the subsequent quarter-wave plate optimizations operate in a region closer to the global minimum. The QHQ order risks optimizing the quarter-wave plates for a suboptimal polarization direction, which the later half-wave plate adjustment cannot fully correct due to the sequential, greedy nature of the algorithm.
+
+\subsection{Drift and diurnal variation}
+
+The 66.6-hour drift experiment revealed a clear diurnal pattern (Figure~\ref{fig:day_night}). The nighttime standard deviation (1.9\,dBm) was substantially lower than daytime values (3.4\,dBm), and the worst outliers ($-6.9$\,dBm and $-7.3$\,dBm) occurred during afternoon and morning hours respectively. Several factors contribute to this variation:
+
+\begin{itemize}
+    \item \textbf{Temperature}: The laboratory is not temperature-controlled. Thermal expansion of fibres and optical mounts can shift the polarization state between optimizations.
+    \item \textbf{Mechanical disturbance}: Foot traffic and door openings during daytime introduce vibrations that affect fibre coupling and waveplate alignment.
+    \item \textbf{Instrument noise}: The power meter (Thorlabs PM100D) has a specified accuracy of $\pm 5$\,\% in the measured range, corresponding to approximately $\pm 0.2$\,dB---small compared to the observed variation.
+\end{itemize}
+
+The survival curve (Figure~\ref{fig:survival}) shows that the system maintains acceptable power ($<{-20}$\,dBm) for at least 10 minutes in 81\,\% of cases, but this drops to 60\,\% at 30 minutes and 22\,\% at 60 minutes. This confirms that periodic re-optimization is necessary and that a 5--10 minute re-optimization interval is appropriate for maintaining stable operation.
+
+Despite the drift, 98.1\,\% of all drift samples remained below $-20$\,dBm. The median sample-to-sample change was only 0.10\,dB, indicating that the polarization state is generally stable on short timescales. Isolated step changes of up to 21.1\,dB show that sudden environmental disturbances can cause rapid polarization shifts that a fixed interval may not catch in time.
+
+\subsection{Automated vs.\ manual operation}
+
+Manual polarization alignment typically takes several minutes per attempt. The automated system completes the same task in a median of 34 seconds and can run unattended for days. Over the 66.6-hour test, 75 optimizations were performed without human intervention. This frees the operator from a repetitive task and enables continuous monitoring that would be impractical to maintain manually.

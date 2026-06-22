@@ -51,18 +51,7 @@ def save(fig, folder, name):
 
 
 def add_thresholds(ax):
-    for value, label in POWER_THRESHOLDS:
-        ax.axhline(value, color="#444444", linestyle="--", linewidth=1, alpha=0.7)
-        ax.text(
-            0.99,
-            value,
-            label,
-            transform=ax.get_yaxis_transform(),
-            ha="right",
-            va="bottom",
-            fontsize=8,
-            color="#444444",
-        )
+    pass
 
 
 def format_time_axis(ax):
@@ -108,7 +97,7 @@ def heatmap_from_bins(df, x_col, y_col, value_col, folder, filename, title):
     save(fig, folder, filename)
 
 
-def plot_box_by_category(df, category, value, folder, filename, title, max_categories=None):
+def plot_box_by_category(df, category, value, folder, filename, title, max_categories=None, thresholds=True):
     grouped = [(str(k), g[value].dropna().values) for k, g in df.groupby(category, sort=True)]
     grouped = [(label, values) for label, values in grouped if len(values)]
     if max_categories is not None and len(grouped) > max_categories:
@@ -120,8 +109,7 @@ def plot_box_by_category(df, category, value, folder, filename, title, max_categ
     ax.set_xlabel(category)
     ax.set_ylabel(value)
     ax.tick_params(axis="x", rotation=70)
-    if value == "power_dbm":
-        add_thresholds(ax)
+    pass
     save(fig, folder, filename)
 
 
@@ -182,9 +170,6 @@ def make_opt_graphs(opt):
     ax.set_title("Optimized power distribution")
     ax.set_xlabel("Power (dBm)")
     ax.set_ylabel("Count")
-    for value, label in POWER_THRESHOLDS:
-        ax.axvline(value, color="#333333", linestyle="--", linewidth=1, label=label)
-    ax.legend()
     save(fig, OPT_DIR, "003_power_histogram.png")
 
     plot_box_by_category(
@@ -194,6 +179,7 @@ def make_opt_graphs(opt):
         OPT_DIR,
         "004_power_boxplot_by_arm_order.png",
         "Power by arm order",
+        thresholds=False,
     )
 
     fig, ax = plt.subplots()
@@ -448,9 +434,6 @@ def make_drift_graphs(drift):
     ax.set_title("Drift power distribution")
     ax.set_xlabel("Power (dBm)")
     ax.set_ylabel("Count")
-    for value, label in POWER_THRESHOLDS:
-        ax.axvline(value, color="#333333", linestyle="--", linewidth=1, label=label)
-    ax.legend()
     save(fig, DRIFT_DIR, "004_drift_power_histogram.png")
 
     fig, ax = plt.subplots()
